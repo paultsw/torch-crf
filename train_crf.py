@@ -7,6 +7,7 @@ import torch.optim as optim
 from crf import ConvCRF, BiLSTMCRF
 from data.loader import NPZLoader
 from utils.logging import Logger
+import os
 
 ##################################################
 # Read configuration file from input.
@@ -17,7 +18,7 @@ parser = argparse.ArgumentParser(description="Train a linear-chain CRF model.")
 parser.add_argument("--config", dest="config", default="./configs/config.json")
 args = parser.parse_args()
 config = json_to_config(args.config)
-config_to_json(config,config['save_dir'])
+config_to_json(config,os.path.join(config['save_dir'], "config.json"))
 
 ##################################################
 # Specify all hyperparameters; construct
@@ -47,7 +48,7 @@ save_dir = config['save_dir']
 assert (config['crf']['type'] in ['conv', 'lstm'])
 # Convolutional CRF:
 if (config['crf']['type'] == 'conv'):
-    conv_layers = config['crf']['conv']
+    conv_layers = config['crf']['conv_layers']
     crf = ConvCRF(input_dim, embed_dim, conv_layers, num_labels, batch_size,
                   start_token=start_ix, stop_token=stop_ix, gap_token=pad_ix,
                   use_cuda=cuda)
@@ -66,10 +67,8 @@ learning_rate = config['optim']['learning_rate']
 wd = config['optim']['wd']
 if config['optim']['type'] == 'rmsprop':
     opt = optim.RMSprop(crf.parameters())
-    optim_step = rmsprop_step
 if config['optim']['type'] == 'lbfgs':
     opt = optim.LBFGS(crf.parameters())
-    optim_step = lbfgs_step
 
 def rmsprop_step(e,b):
     opt.zero_grad() # (clear grads)
@@ -77,6 +76,7 @@ def rmsprop_step(e,b):
     tr_nll = crf.neg_log_likelihood(e, b)
     tr_nll.backward()
     opt.step()
+    return tr_nll
 
 def lbfgs_step(e,b):
     def closure():
@@ -87,7 +87,12 @@ def lbfgs_step(e,b):
         return tr_nll
     opt.step(closure)
     tr_nll = crf.neg_log_likelihood(e, b)
+    return tr_nll
 
+if config['optim']['type'] == 'rmsprop':
+    optim_step = rmsprop_step
+if config['optim']['type'] == 'lbfgs':
+    optim_step = lbfgs_step
 ##################################################
 # Train for several epochs; if Ctrl-C interrupts,
 # print message and deallocate.
@@ -107,7 +112,7 @@ try:
                 _bases = _bases.cuda()
 
             # compute loss, grads, updates:
-            optim_step(_events, _bases)
+            tr_nll = optim_step(_events, _bases)
             
             # print to stdout occasionally:
             if step % print_every == 0:
