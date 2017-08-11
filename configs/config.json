@@ -1,0 +1,28 @@
+{
+    "input_dim": 7,
+    "embed_dim": 400,
+    "num_labels": 8,
+    "start_ix": 1,
+    "stop_ix": 2,
+    "pad_ix": 0,
+    "batch_size": 8,
+    "num_epochs": 40,
+    "max_iters": 1000,
+    "print_every": 25,
+    "save_every": 1000,
+    "print_viterbi": true,
+    "train_set": "./data/ecoli_train_80pct.npz",
+    "test_set": "./data/ecoli_test_20pct.npz",
+    "save_dir": "./runs/",
+    "optim": {
+	"type": "rmsprop",
+	"learning_rate": 0.01,
+	"wd": 0.0001
+    },
+    "crf": {
+	"type": "conv",
+	"hidden_dim": 100,
+	"lstm_layers": 5,
+	"conv_layers": [(1, 400, 512), (3, 512, 512), (3, 512, 512), (3, 512, 512), (3, 512, 512)]
+    }
+}

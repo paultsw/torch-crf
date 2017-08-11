@@ -1,87 +1,152 @@
 """
 Training loop for conditional random field.
-
-Credit to PyTorch's advanced NLP tutorial for crucial insight into good ways of structuring
-a BiLSTM-based CRF code in PyTorch:
-
-http://pytorch.org/tutorials/beginner/nlp/advanced_tutorial.html
 """
 import torch
 from torch.autograd import Variable
 import torch.optim as optim
 from crf import ConvCRF, BiLSTMCRF
 from data.loader import NPZLoader
+from utils.logging import Logger
 
 ##################################################
-# Specify all hyperparameters and construct
+# Read configuration file from input.
+##################################################
+from utils.config_tools import json_to_config, config_to_json
+import argparse
+parser = argparse.ArgumentParser(description="Train a linear-chain CRF model.")
+parser.add_argument("--config", dest="config", default="./configs/config.json")
+args = parser.parse_args()
+config = json_to_config(args.config)
+config_to_json(config,config['save_dir'])
+
+##################################################
+# Specify all hyperparameters; construct
 # model and SGD optimizer.
 ##################################################
-input_dim = 6
-embed_dim = 400
-num_labels = 7
-start_ix = 5
-stop_ix = 6
-pad_ix = 4
-batch_size = 32
+# ----- model settings:
+input_dim = config['input_dim']
+embed_dim = config['embed_dim']
+num_labels = config['num_labels']
+start_ix = config['start_ix']
+stop_ix = config['stop_ix']
+pad_ix = config['pad_ix']
+batch_size = config['batch_size']
+cuda = torch.cuda.is_available()
 
-# ----- uncomment to use convolutional CRF:
-"""
-conv_layers = [(1, 400, 512), (3, 512, 512), (3, 512, 512), (3, 512, 512), (3, 512, 512)]
-crf = ConvCRF(input_dim, embed_dim, conv_layers, num_labels, batch_size,
-              start_token=start_ix, stop_token=stop_ix, gap_token=pad_ix,
-              use_cuda=False)
-"""
-# ----- uncomment to use bidir. lstm CRF:
-hidden_dim = 100
-assert (hidden_dim % 2 == 0)
-crf = BiLSTMCRF(input_dim, embed_dim, hidden_dim, num_labels, batch_size,
-                start_token=start_ix, stop_token=stop_ix, gap_token=pad_ix, use_cuda=False)
+# ----- training settings:
+num_epochs = config['num_epochs']
+max_iters = config['max_iters']
+print_every = config['print_every']
+save_every = config['save_every']
+print_viterbi = config['print_viterbi']
+train_set = config['train_set']
+test_set = config['test_set']
+save_dir = config['save_dir']
 
-learning_rate = 0.01
-wd = 1e-4
-opt = optim.RMSprop(crf.parameters())
+# ----- build CRF:
+assert (config['crf']['type'] in ['conv', 'lstm'])
+# Convolutional CRF:
+if (config['crf']['type'] == 'conv'):
+    conv_layers = config['crf']['conv']
+    crf = ConvCRF(input_dim, embed_dim, conv_layers, num_labels, batch_size,
+                  start_token=start_ix, stop_token=stop_ix, gap_token=pad_ix,
+                  use_cuda=cuda)
+# Bidirectional LSTM CRF:
+if (config['crf']['type'] == 'lstm'):
+    hidden_dim = config['crf']['hidden_dim']
+    layers = config['crf']['lstm_layers']
+    assert (hidden_dim % 2 == 0) # sanity check
+    crf = BiLSTMCRF(input_dim, embed_dim, hidden_dim, num_labels, batch_size,
+                    start_token=start_ix, stop_token=stop_ix, gap_token=pad_ix,
+                    num_layers=layers, use_cuda=cuda)
+
+# ----- optimizer settings:
+assert (config['optim']['type'] in ['rmsprop', 'lbfgs'])
+learning_rate = config['optim']['learning_rate']
+wd = config['optim']['wd']
+if config['optim']['type'] == 'rmsprop':
+    opt = optim.RMSprop(crf.parameters())
+    optim_step = rmsprop_step
+if config['optim']['type'] == 'lbfgs':
+    opt = optim.LBFGS(crf.parameters())
+    optim_step = lbfgs_step
+
+def rmsprop_step(e,b):
+    opt.zero_grad() # (clear grads)
+    # forward pass and compute -CLL(bases|events):
+    tr_nll = crf.neg_log_likelihood(e, b)
+    tr_nll.backward()
+    opt.step()
+
+def lbfgs_step(e,b):
+    def closure():
+        opt.zero_grad()
+        # forward pass and compute -CLL(bases|events):
+        tr_nll = crf.neg_log_likelihood(e, b)
+        tr_nll.backward()
+        return tr_nll
+    opt.step(closure)
+    tr_nll = crf.neg_log_likelihood(e, b)
 
 ##################################################
-# Train for 40 epochs; if Ctrl-C interrupts,
+# Train for several epochs; if Ctrl-C interrupts,
 # print message and deallocate.
 ##################################################
-num_epochs = 40
-print_every = 100
+logger = Logger(save_dir)
 step = 0
 try:
     for _ in range(num_epochs):
-        dataset = NPZLoader("./data/train_60k.npz",
-                            "./data/test_40k.npz",
-                            batch_size=batch_size)
+        dataset = NPZLoader(train_set, test_set, batch_size=batch_size)
         for events, bases in dataset.training_batches:
-            # gradients are accumulated by PyTorch; clear them out before each backprop step:
-            crf.zero_grad()
     
             # preprocess events and bases batches:
             _events = Variable(events.transpose(0,1).contiguous())
             _bases = Variable(bases.transpose(0,1).contiguous().long())
+            if cuda:
+                _events = _events.cuda()
+                _bases = _bases.cuda()
 
-            # forward pass and compute -CLL(bases|events):
-            neg_log_likelihood = crf.neg_log_likelihood(_events, _bases)
+            # compute loss, grads, updates:
+            optim_step(_events, _bases)
             
             # print to stdout occasionally:
             if step % print_every == 0:
                 val_events, val_bases = dataset.fetch_test_batch()
                 val_events = Variable(val_events.transpose(0,1).contiguous())
                 val_bases = Variable(val_bases.transpose(0,1).contiguous().long())
-                validation_nll = crf.neg_log_likelihood(val_events, val_bases)
-                print("Step: {0} | Training NCLL: {1} | Validation NCLL: {2}".format(
-                      step, neg_log_likelihood.data[0], validation_nll.data[0]))
+                if cuda:
+                   val_events = val_events.cuda()
+                   val_bases = val_bases.cuda()
+                val_nll = crf.neg_log_likelihood(val_events, val_bases)
+                if print_viterbi:
+                    vscore, vpaths = crf(val_events)
+                    print("Viterbi score:")
+                    print(vscore)
+                    print("Viterbi paths:")
+                    print(vpaths)
+                logger.log(step, tr_nll.data[0], val_nll.data[0],
+                           tr_nll.data[0]/batch_size, val_nll.data[0]/batch_size)
 
-            # compute loss, grads, updates:
-            neg_log_likelihood.backward()
-            opt.step()
+            # serialize model occasionally:
+            if step % save_every == 0: logger.save(step, crf)
 
             step += 1
+            if step > max_iters: raise StopIteration
 
         del dataset
+#--- handle keyboard interrupts:
 except KeyboardInterrupt:
     del dataset
+    logger.close()
     print("-" * 80)
-    print("Halted training.")
-
+    print("Halted training; reached {} training iterations.".format(step))
+except StopIteration:
+    del dataset
+    logger.close()
+    print("-" * 80)
+    print("Finished training; reached max iterations of {}.".format(max_iters))
+except Exception as e:
+    print("Something went wrong:")
+    print(e)
+    del dataset
+    logger.close()

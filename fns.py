@@ -134,7 +134,7 @@ def argmax(vec, dim=1):
     return ix.view(-1).data.tolist()
 
 
-def log_sum_exp(vec):
+def log_sum_exp(vec, use_cuda=False):
     """
     Compute log sum exp in a numerically stable way for the forward algorithm.
 
@@ -151,7 +151,8 @@ def log_sum_exp(vec):
     Return:
     * logsumexp: FloatTensor Variable of size (batch).
     """
-    max_ixs = torch.autograd.Variable(torch.LongTensor(argmax(vec, 1)))
+    _max_ixs = torch.cuda.LongTensor(argmax(vec, 1)) if use_cuda else torch.LongTensor(argmax(vec, 1))
+    max_ixs = torch.autograd.Variable(_max_ixs)
     max_scores = torch.index_select(vec, 1, max_ixs).diag()
     max_scores_broadcast = max_scores.unsqueeze(1).expand(vec.size())
     return max_scores + torch.log(torch.sum(torch.exp(vec - max_scores_broadcast),1))

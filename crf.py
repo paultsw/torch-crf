@@ -69,7 +69,13 @@ class ConvCRF(nn.Module):
         # linear projection to dimension over labels:
         self.out_proj = nn.Linear(conv_layers[-1][2], num_labels)
         # initialize target state transition matrix with random values:
-        self.transitions = nn.Parameter(torch.randn(num_labels, num_labels))
+        _init_transitions = torch.randn(num_labels, num_labels)
+        if use_cuda: _init_transitions = _init_transitions.cuda()
+        self.transitions = nn.Parameter(_init_transitions)
+
+        ### put on GPU if requested:
+        if use_cuda:
+            [m.cuda() for m in self.modules()]
 
 
     def init_params(self):
@@ -166,9 +172,14 @@ class BiLSTMCRF(nn.Module):
     Definition of a CRF with features coming from a bidirectional LSTM.
     """
     def __init__(self, input_dim, embed_dim, hidden_dim, num_labels, batch_size,
-                 start_token=0, stop_token=1, gap_token=2, use_cuda=__CUDA__):
+                 start_token=0, stop_token=1, gap_token=2, num_layers=1, use_cuda=__CUDA__):
         """
         Construct modules of a convolutional fully-connected CRF.
+
+        Args:
+        *
+        *
+        *
         """
         ### call parent initializer:
         super(BiLSTMCRF, self).__init__()
@@ -182,25 +193,42 @@ class BiLSTMCRF(nn.Module):
         self.start_token = start_token
         self.stop_token = stop_token
         self.gap_token = gap_token
+        self.num_layers = num_layers
         self.use_cuda = use_cuda
 
         ### stateful attributes:
+        self.direct_proj = nn.Linear(input_dim, hidden_dim)
         # projection to embedding dimension:
         self.in_proj = nn.Linear(input_dim, embed_dim)
-        # create BiLSTM:
-        self.lstm = nn.LSTM(embed_dim, hidden_dim // 2, num_layers=1, bidirectional=True)
+        # projection from embedding to hidden:
+        self.emb_to_lstm = nn.Linear(embed_dim, hidden_dim)
+        # create BiLSTM layers (skip-connections are used later on):
+        self.lstm_layers = nn.ModuleList(
+            [nn.LSTM(hidden_dim, hidden_dim // 2, bidirectional=True) for _ in range(num_layers)])
         # linear projection to dimension over labels:
         self.out_proj = nn.Linear(hidden_dim, num_labels)
         # initialize target state transition matrix with random values:
-        self.transitions = nn.Parameter(torch.randn(num_labels, num_labels))
+        _init_transitions = torch.randn(num_labels, num_labels)
+        if use_cuda: _init_transitions = _init_transitions.cuda()
+        self.transitions = nn.Parameter(_init_transitions)
+
+        ### move to GPU if requested
+        if use_cuda:
+            self.direct_proj.cuda()
+            self.in_proj.cuda()
+            self.emb_to_lstm.cuda()
+            [layer.cuda() for layer in self.lstm_layers]
+            self.out_proj.cuda()
 
 
     def init_hidden(self):
         """
         Return initial states for BiLSTM hidden units.
         """
-        return (Variable(torch.randn(2, self.batch_size, self.hidden_dim // 2)),
-                Variable(torch.randn(2, self.batch_size, self.hidden_dim // 2)))
+        hiddens = (Variable(torch.randn(2, self.batch_size, self.hidden_dim // 2)),
+                   Variable(torch.randn(2, self.batch_size, self.hidden_dim // 2)))
+        if self.use_cuda: hiddens = (hiddens[0].cuda(), hiddens[1].cuda())
+        return hiddens
 
 
     def get_bilstm_features(self, source_seq):
@@ -214,10 +242,21 @@ class BiLSTMCRF(nn.Module):
         Returns:
         * lstm_feats: FloatTensor variable of shape (sequence, batch, num_labels).
         """
+        # project to embedding dimension:
         source_proj = self.in_proj(source_seq.view(-1, self.input_dim)).view(len(source_seq), self.batch_size, self.embed_dim)
-        self.hidden = self.init_hidden()
-        lstm_out, self.hidden = self.lstm(source_proj, self.hidden)
-        lstm_feats = self.out_proj(lstm_out.view(-1, self.hidden_dim)).view(len(lstm_out), self.batch_size, self.num_labels)
+        
+        # project to hidden dimension:
+        lstm_seq0 = self.emb_to_lstm(source_proj.view(-1, self.embed_dim)).view(-1, self.batch_size, self.hidden_dim)
+        lstm_seq1 = self.direct_proj(source_seq.view(-1, self.input_dim)).view(len(source_seq), self.batch_size, self.hidden_dim)
+        lstm_seq = lstm_seq0 + lstm_seq1
+
+        # compute bidir LSTM outputs with skip-connections:
+        for lstm_layer in self.lstm_layers:
+            self.hidden = self.init_hidden()
+            lstm_seq, self.hidden = lstm_layer(lstm_seq, self.hidden)
+
+        # map to `num_labels` dimension:
+        lstm_feats = self.out_proj(lstm_seq.view(-1, self.hidden_dim)).view(len(lstm_seq), self.batch_size, self.num_labels)
         
         return lstm_feats
 

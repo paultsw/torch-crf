@@ -7,7 +7,7 @@ from torch.autograd import Variable
 from dynamic import forward_alg, score_sequences, viterbi_decode
 
 num_labels = 6
-batch_size = 5
+batch_size = 1
 gap_token = 0
 start_token = 1
 stop_token = 2
@@ -25,6 +25,8 @@ print(score_sequences(features, labels, batch_size, transitions, start_token, st
 
 print("==================== Viterbi Decoding Tests: ====================")
 scores, best_paths = viterbi_decode(features, transitions, batch_size, num_labels, start_token, stop_token)
+print("Logits:")
+print(features)
 print("Best path scores:")
 print(scores)
 print("Best paths:")
